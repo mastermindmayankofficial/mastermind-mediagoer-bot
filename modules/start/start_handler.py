@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -5,6 +6,26 @@ from modules.database.user_db import add_or_update_user_db, get_user_role_db, se
 from modules.database.config_db import get_template, format_template_string
 from modules.allowance.referral import process_referral_with_notification
 from modules.allowance.allowance import get_user_quota_summary
+
+CATEGORY_HELPER_ENV = {
+    "book": ("BOOK_HELPER_BOT_USERNAME", "BOOK_HELPER_USERNAME", "HELPER_BOT_USERNAME"),
+    "movie": ("MOVIE_HELPER_BOT_USERNAME", "MOVIE_HELPER_USERNAME", "HELPER_BOT_USERNAME"),
+    "anime": ("ANIME_HELPER_BOT_USERNAME", "ANIME_HELPER_USERNAME", "HELPER_BOT_USERNAME"),
+}
+CATEGORY_HELPER_LABEL = {
+    "book": "Books",
+    "movie": "Movies",
+    "anime": "Anime",
+}
+
+
+def get_helper_bot_username(category: str):
+    keys = CATEGORY_HELPER_ENV.get(category, ("HELPER_BOT_USERNAME",))
+    for key in keys:
+        value = (os.getenv(key) or "").strip().strip("@")
+        if value:
+            return value
+    return ""
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,6 +54,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     elif args and args[0] == "helper_init":
         referral_notice = "\n\n✅ <b>Helper Bot Activated!</b> You can now click any search result to receive files in the posting channel and DM."
+    elif args and args[0].startswith("helper_init_"):
+        category = args[0].replace("helper_init_", "", 1).strip("_").lower()
+        label = CATEGORY_HELPER_LABEL.get(category, category.title())
+        referral_notice = f"\n\n✅ <b>{label} Helper Bot Activated!</b> You can now click any {label.lower()} search result to receive files in the posting channel and DM."
 
     tpl = get_template("start")
     raw_txt = tpl.get("text") or "Hi <b>{user_name}</b>, welcome to <b>{bot_title}</b>! 👋"
@@ -45,7 +70,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("🔍 Search All", callback_data="search_menu"), InlineKeyboardButton("📖 Help Menu", callback_data="help_button")],
         [InlineKeyboardButton("🎬 Movie Search", callback_data="movie_search_menu"), InlineKeyboardButton("⛩️ Anime Search", callback_data="anime_search_menu")],
-        [InlineKeyboardButton("📊 My Quota", callback_data="quota_menu"), InlineKeyboardButton("📤 Refer & Earn +10", url=share_url)],
+        [InlineKeyboardButton("📚 Books Helper", callback_data="helper_menu_book"), InlineKeyboardButton("🎬 Movies Helper", callback_data="helper_menu_movie")],
+        [InlineKeyboardButton("⛩️ Anime Helper", callback_data="helper_menu_anime"), InlineKeyboardButton("📊 My Quota", callback_data="quota_menu")],
+        [InlineKeyboardButton("📤 Refer & Earn +10", url=share_url)],
     ]
     for b in tpl.get("buttons", []):
         if b.get("type") == "url":
@@ -84,6 +111,26 @@ async def menu_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
     elif d == "stats_menu":
         from modules.stats.handlers import stats_command
         await stats_command(update, context)
+    elif d.startswith("helper_menu_"):
+        await q.answer()
+        category = d.replace("helper_menu_", "", 1).strip("_").lower()
+        label = CATEGORY_HELPER_LABEL.get(category, category.title())
+        helper_username = get_helper_bot_username(category)
+        if helper_username:
+            start_link = f"https://t.me/{helper_username}?start=helper_init_{category}"
+            txt = (
+                f"📦 <b>{label} Helper Bot</b>\n\n"
+                f"Start the dedicated helper bot here: <a href='{start_link}'>@{helper_username}</a>\n\n"
+                f"This helper is intended for {label.lower()} file delivery in the posting channel and DM."
+            )
+        else:
+            env_name = next(iter(CATEGORY_HELPER_ENV.get(category, ("HELPER_BOT_USERNAME",))), "HELPER_BOT_USERNAME")
+            txt = (
+                f"📦 <b>{label} Helper Bot</b>\n\n"
+                f"No helper bot is configured yet. Add <code>{env_name}</code> to your env.txt or .env file to enable dedicated {label.lower()} delivery."
+            )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("≼ Back to Start", callback_data="start_menu")]])
+        await q.message.edit_text(txt, parse_mode="HTML", reply_markup=kb)
     elif d in ("quota", "quota_menu"):
         await q.answer()
         s = get_user_quota_summary(q.from_user.id)
