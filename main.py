@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import logging
 from telegram.ext import (
@@ -51,6 +52,14 @@ from modules.utility.ping import ping_command
 from modules.message.message_handler import handle_normal_text
 
 
+def _read_env_value(*names):
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
 def load_env():
     for env_path in ("env.txt", ".env"):
         if os.path.exists(env_path):
@@ -59,6 +68,34 @@ def load_env():
                     if "=" in line and not line.strip().startswith("#"):
                         k, v = line.strip().split("=", 1)
                         os.environ[k.strip()] = v.strip()
+
+    # Primary bot token support.
+    primary_token = _read_env_value("TELEGRAM_BOT_TOKEN", "BOT_TOKEN")
+    if primary_token:
+        os.environ.setdefault("TELEGRAM_BOT_TOKEN", primary_token)
+        os.environ.setdefault("BOT_TOKEN", primary_token)
+
+    # Helper bot token support (default + category-specific variants).
+    helper_aliases = [
+        "HELPER_TELEGRAM_BOT_TOKEN",
+        "HELPER_BOT_TOKEN",
+        "HELPER_BOT",
+        "TELEGRAM_HELPER_BOT_TOKEN",
+    ]
+    default_helper = _read_env_value(*helper_aliases)
+    if default_helper:
+        os.environ.setdefault("HELPER_BOT_TOKEN", default_helper)
+        os.environ.setdefault("HELPER_TELEGRAM_BOT_TOKEN", default_helper)
+
+    category_tokens = {
+        "default": default_helper,
+        "book": _read_env_value("BOOK_HELPER_BOT_TOKEN", "BOOK_TELEGRAM_BOT_TOKEN", "BOOK_HELPER_TOKEN"),
+        "movie": _read_env_value("MOVIE_HELPER_BOT_TOKEN", "MOVIE_TELEGRAM_BOT_TOKEN", "MOVIE_HELPER_TOKEN"),
+        "anime": _read_env_value("ANIME_HELPER_BOT_TOKEN", "ANIME_TELEGRAM_BOT_TOKEN", "ANIME_HELPER_TOKEN"),
+    }
+    category_tokens = {k: v for k, v in category_tokens.items() if v}
+    if category_tokens:
+        os.environ["HELPER_BOT_TOKENS"] = json.dumps(category_tokens)
 
 
 def main():
@@ -72,6 +109,18 @@ def main():
     if not token:
         print("❌ Please set TELEGRAM_BOT_TOKEN in env.txt")
         exit(1)
+
+    helper_tokens = json.loads(os.getenv("HELPER_BOT_TOKENS", "{}")) if os.getenv("HELPER_BOT_TOKENS") else {}
+    if not helper_tokens:
+        helper_tokens = {
+            "default": os.getenv("HELPER_BOT_TOKEN") or os.getenv("HELPER_TELEGRAM_BOT_TOKEN"),
+            "book": os.getenv("BOOK_HELPER_BOT_TOKEN") or os.getenv("BOOK_TELEGRAM_BOT_TOKEN"),
+            "movie": os.getenv("MOVIE_HELPER_BOT_TOKEN") or os.getenv("MOVIE_TELEGRAM_BOT_TOKEN"),
+            "anime": os.getenv("ANIME_HELPER_BOT_TOKEN") or os.getenv("ANIME_TELEGRAM_BOT_TOKEN"),
+        }
+    helper_tokens = {k: v for k, v in helper_tokens.items() if v}
+    if helper_tokens:
+        os.environ["HELPER_BOT_TOKENS"] = json.dumps(helper_tokens)
 
     logging.basicConfig(level=logging.INFO)
     setup_in_memory_logger()
@@ -164,6 +213,7 @@ def main():
 
     app.post_init = post_init
     print("🤖 Mastermind Multi-Media & Library Bot is online and polling...")
+    print(f"✅ Loaded helper bot tokens: {', '.join(helper_tokens.keys()) if helper_tokens else 'none configured'}")
     app.run_polling()
 
 
