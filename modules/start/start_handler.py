@@ -1,30 +1,89 @@
 import os
+import random
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from modules.database.user_db import add_or_update_user_db, get_user_role_db, set_helper_started_db
 from modules.database.config_db import get_template, format_template_string
 from modules.allowance.referral import process_referral_with_notification
 from modules.allowance.allowance import get_user_quota_summary
 
-CATEGORY_HELPER_ENV = {
-    "book": ("BOOK_HELPER_BOT_USERNAME", "BOOK_HELPER_USERNAME", "HELPER_BOT_USERNAME"),
-    "movie": ("MOVIE_HELPER_BOT_USERNAME", "MOVIE_HELPER_USERNAME", "HELPER_BOT_USERNAME"),
-    "anime": ("ANIME_HELPER_BOT_USERNAME", "ANIME_HELPER_USERNAME", "HELPER_BOT_USERNAME"),
+HELPER_CATEGORY_CONFIG = {
+    "book": {
+        "label": "Books",
+        "username_envs": ("BOOK_HELPER_BOT_USERNAME", "BOOK_HELPER_USERNAME", "BOOK_HELPER_NAME", "HELPER_BOT_USERNAME"),
+        "token_envs": ("BOOK_HELPER_BOT_TOKENS", "BOOK_HELPER_TOKENS", "BOOK_HELPER_TOKEN", "HELPER_BOT_TOKENS"),
+    },
+    "movie": {
+        "label": "Movies",
+        "username_envs": ("MOVIE_HELPER_BOT_USERNAME", "MOVIE_HELPER_USERNAME", "MOVIE_HELPER_NAME", "HELPER_BOT_USERNAME"),
+        "token_envs": ("MOVIE_HELPER_BOT_TOKENS", "MOVIE_HELPER_TOKENS", "MOVIE_HELPER_TOKEN", "HELPER_BOT_TOKENS"),
+    },
+    "anime": {
+        "label": "Anime",
+        "username_envs": ("ANIME_HELPER_BOT_USERNAME", "ANIME_HELPER_USERNAME", "ANIME_HELPER_NAME", "HELPER_BOT_USERNAME"),
+        "token_envs": ("ANIME_HELPER_BOT_TOKENS", "ANIME_HELPER_TOKENS", "ANIME_HELPER_TOKEN", "HELPER_BOT_TOKENS"),
+    },
 }
-CATEGORY_HELPER_LABEL = {
-    "book": "Books",
-    "movie": "Movies",
-    "anime": "Anime",
-}
+
+
+def _split_env_list(raw_value: str):
+    if not raw_value:
+        return []
+    values = []
+    for chunk in raw_value.replace(";", ",").replace("\n", ",").replace("|", ",").split(","):
+        item = chunk.strip().strip("@ ")
+        if item:
+            values.append(item)
+    return values
+
+
+def _read_helper_values(category: str, env_key_name: str):
+    config = HELPER_CATEGORY_CONFIG.get(category, {})
+    env_names = config.get(env_key_name, ())
+    values = []
+    for key in env_names:
+        value = os.getenv(key)
+        if value:
+            values.extend(_split_env_list(value))
+    return values
 
 
 def get_helper_bot_username(category: str):
-    keys = CATEGORY_HELPER_ENV.get(category, ("HELPER_BOT_USERNAME",))
-    for key in keys:
-        value = (os.getenv(key) or "").strip().strip("@")
-        if value:
-            return value
+    values = _read_helper_values(category, "username_envs")
+    if values:
+        return random.choice(values).strip("@")
+    return ""
+
+
+def get_helper_bot_token(category: str):
+    values = _read_helper_values(category, "token_envs")
+    if values:
+        return random.choice(values)
+    return ""
+
+
+async def fetch_helper_bot_username_from_token(category: str, context: ContextTypes.DEFAULT_TYPE | None = None):
+    username = get_helper_bot_username(category)
+    if username:
+        return username
+
+    token_values = _read_helper_values(category, "token_envs")
+    if not token_values:
+        return ""
+
+    token = random.choice(token_values)
+    try:
+        bot = Bot(token)
+        me = await bot.get_me()
+        returned_username = (me.username or "").strip("@")
+        if returned_username:
+            return returned_username
+    except Exception:
+        pass
+
+    # Final fallback: if the token itself is a Telegram bot token, the username is not discoverable without API access.
+    # In that case, we keep the token-based selection but avoid crashing.
     return ""
 
 
@@ -56,7 +115,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         referral_notice = "\n\n✅ <b>Helper Bot Activated!</b> You can now click any search result to receive files in the posting channel and DM."
     elif args and args[0].startswith("helper_init_"):
         category = args[0].replace("helper_init_", "", 1).strip("_").lower()
-        label = CATEGORY_HELPER_LABEL.get(category, category.title())
+        label = HELPER_CATEGORY_CONFIG.get(category, {}).get("label", category.title())
         referral_notice = f"\n\n✅ <b>{label} Helper Bot Activated!</b> You can now click any {label.lower()} search result to receive files in the posting channel and DM."
 
     tpl = get_template("start")
@@ -114,20 +173,26 @@ async def menu_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
     elif d.startswith("helper_menu_"):
         await q.answer()
         category = d.replace("helper_menu_", "", 1).strip("_").lower()
-        label = CATEGORY_HELPER_LABEL.get(category, category.title())
-        helper_username = get_helper_bot_username(category)
+        label = HELPER_CATEGORY_CONFIG.get(category, {}).get("label", category.title())
+        helper_username = await fetch_helper_bot_username_from_token(category, context)
+        helper_token = get_helper_bot_token(category)
         if helper_username:
             start_link = f"https://t.me/{helper_username}?start=helper_init_{category}"
+            helper_note = "Random helper bot selected from the configured category pool."
+            if helper_token:
+                helper_note = "Random helper bot and token selected from the configured category pool."
             txt = (
                 f"📦 <b>{label} Helper Bot</b>\n\n"
                 f"Start the dedicated helper bot here: <a href='{start_link}'>@{helper_username}</a>\n\n"
-                f"This helper is intended for {label.lower()} file delivery in the posting channel and DM."
+                f"{helper_note}\n"
+                f"This helper is intended only for {label.lower()} file delivery in the posting channel and DM."
             )
         else:
-            env_name = next(iter(CATEGORY_HELPER_ENV.get(category, ("HELPER_BOT_USERNAME",))), "HELPER_BOT_USERNAME")
+            env_name = next(iter(HELPER_CATEGORY_CONFIG.get(category, {}).get("username_envs", ("HELPER_BOT_USERNAME",))), "HELPER_BOT_USERNAME")
             txt = (
                 f"📦 <b>{label} Helper Bot</b>\n\n"
-                f"No helper bot is configured yet. Add <code>{env_name}</code> to your env.txt or .env file to enable dedicated {label.lower()} delivery."
+                f"No helper bot is configured yet for this category. Add <code>{env_name}</code> to your env.txt or .env file to enable dedicated {label.lower()} delivery.\n\n"
+                f"You can also provide a comma-separated token list in <code>{category.upper()}_HELPER_BOT_TOKENS</code> and the bot will fetch the username automatically using the token."
             )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("≼ Back to Start", callback_data="start_menu")]])
         await q.message.edit_text(txt, parse_mode="HTML", reply_markup=kb)
